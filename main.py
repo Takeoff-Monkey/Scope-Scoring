@@ -361,6 +361,15 @@ def generate_pdf(job_results_list):
     buffer.seek(0)
     return buffer
 
+def sanitize_filename(filename):
+    """Remove or replace characters that are problematic in filenames."""
+    import re
+    safe_name = re.sub(r'[<>:"/\\|?*,]', '_', filename)
+    safe_name = safe_name.replace('.xlsx', '').replace('.xls', '')
+    safe_name = re.sub(r'_+', '_', safe_name)
+    safe_name = safe_name.strip('_')
+    return safe_name[:100]
+
 @app.route('/export-pdf/<job_id>')
 def export_single_pdf(job_id):
     result = get_job_result(job_id)
@@ -375,10 +384,12 @@ def export_single_pdf(job_id):
     
     pdf_buffer = generate_pdf([job_data])
     
+    safe_filename = sanitize_filename(result['filename'])
+    
     return Response(
         pdf_buffer.getvalue(),
         mimetype='application/pdf',
-        headers={'Content-Disposition': f'attachment; filename=ERW_Score_{result["filename"].replace(".xlsx", "").replace(".xls", "")}.pdf'}
+        headers={'Content-Disposition': f'attachment; filename="ERW_Score_{safe_filename}.pdf"'}
     )
 
 @app.route('/export-pdf-batch')
