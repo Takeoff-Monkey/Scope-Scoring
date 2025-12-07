@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ERW Job Scorer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 { color: #1a365d; margin-bottom: 5px; }
+        .header p { color: #666; }
+        .upload-zone {
+            background: white;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        .upload-zone:hover { border-color: #4299e1; }
+        .upload-zone.dragover { border-color: #4299e1; background: #ebf8ff; }
+        input[type="file"] { display: none; }
+        .btn {
+            background: #4299e1;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 15px;
+        }
+        .btn:hover { background: #3182ce; }
+        .btn:disabled { background: #a0aec0; cursor: not-allowed; }
+        .results { margin-top: 30px; }
+        .company-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .company-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .company-name { font-weight: 600; font-size: 18px; }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .score-0 { background: #718096; }
+        .score-1 { background: #e53e3e; }
+        .score-2 { background: #ed8936; }
+        .score-3 { background: #ecc94b; color: #1a202c; }
+        .score-4 { background: #48bb78; }
+        .score-5 { background: #38a169; }
+        .reasoning { color: #4a5568; margin-bottom: 10px; }
+        .indicators {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .indicator {
+            background: #edf2f7;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #4a5568;
+        }
+        .summary-card {
+            background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
+            color: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        .summary-card h3 { margin-top: 0; }
+        .package-score {
+            font-size: 48px;
+            font-weight: bold;
+            text-align: center;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            display: none;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4299e1;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error-card {
+            background: white;
+            border-left: 4px solid #e53e3e;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>ERW Job Scorer</h1>
+        <p>Upload scope extractor output to score opportunities for ERW Site Solutions</p>
+    </div>
+    
+    <div class="upload-zone" id="dropZone">
+        <p id="dropText">Drag & drop your Excel file here, or click to browse</p>
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+        <button class="btn" id="analyzeBtn" disabled>Analyze Job</button>
+    </div>
+    
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <p>Analyzing scope with AI...</p>
+    </div>
+    
+    <div class="results" id="results"></div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+        const dropText = document.getElementById('dropText');
+        let selectedFile = null;
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                handleFile(fileInput.files[0]);
+            }
+        });
+        
+        function handleFile(file) {
+            selectedFile = file;
+            dropText.textContent = file.name;
+            analyzeBtn.disabled = false;
+        }
+        
+        analyzeBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            
+            loading.style.display = 'block';
+            results.innerHTML = '';
+            analyzeBtn.disabled = true;
+            
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    results.innerHTML = `<div class="error-card">
+                        <strong>Error:</strong> ${data.error}
+                    </div>`;
+                } else {
+                    displayResults(data);
+                }
+            } catch (error) {
+                results.innerHTML = `<div class="error-card">
+                    <strong>Error:</strong> ${error.message}
+                </div>`;
+            } finally {
+                loading.style.display = 'none';
+                analyzeBtn.disabled = false;
+            }
+        });
+        
+        function displayResults(data) {
+            const scores = data.scores;
+            const companies = [
+                { key: 'erw_retaining_walls', name: 'ERW Retaining Walls', icon: '' },
+                { key: 'kaufman_concrete', name: 'Kaufman Concrete', icon: '' },
+                { key: 'landtec_landscape', name: 'Landtec Landscape', icon: '' },
+                { key: 'ratliff_hardscape', name: 'Ratliff Hardscape', icon: '' }
+            ];
+            
+            let html = `
+                <div class="summary-card">
+                    <h3>Overall Package Assessment</h3>
+                    <div class="package-score">${scores.package_score}/5</div>
+                    <p style="text-align: center; margin-bottom: 0;">${scores.overall_recommendation}</p>
+                    <p style="text-align: center; font-size: 14px; opacity: 0.8; margin-top: 15px;">
+                        Analyzed ${data.summary.total_sheets} sheets (${data.summary.sheets_with_scope} with scope)
+                    </p>
+                </div>
+            `;
+            
+            companies.forEach(company => {
+                const companyData = scores[company.key];
+                html += `
+                    <div class="company-card">
+                        <div class="company-header">
+                            <span class="company-name">${company.icon} ${company.name}</span>
+                            <div class="score score-${companyData.score}">${companyData.score}</div>
+                        </div>
+                        <p class="reasoning">${companyData.reasoning}</p>
+                        <div class="indicators">
+                            ${companyData.key_indicators.map(i => `<span class="indicator">${i}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            results.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
