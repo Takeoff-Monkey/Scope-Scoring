@@ -156,7 +156,15 @@
         const dropText = document.getElementById('dropText');
         let selectedFile = null;
 
-        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('click', (e) => {
+            if (e.target !== analyzeBtn) {
+                fileInput.click();
+            }
+        });
+        
+        analyzeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
         
         dropZone.addEventListener('dragover', (e) => {
             e.preventDefault();
