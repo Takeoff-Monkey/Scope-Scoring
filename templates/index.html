@@ -43,7 +43,29 @@
         }
         .btn:hover { background: #3182ce; }
         .btn:disabled { background: #a0aec0; cursor: not-allowed; }
+        .btn-secondary {
+            background: #48bb78;
+            margin-left: 10px;
+        }
+        .btn-secondary:hover { background: #38a169; }
         .results { margin-top: 30px; }
+        .job-section {
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .job-section:last-child {
+            border-bottom: none;
+        }
+        .job-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #1a365d;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
         .company-card {
             background: white;
             border-radius: 8px;
@@ -126,6 +148,36 @@
             border-radius: 8px;
             margin-bottom: 15px;
         }
+        .file-list {
+            margin-top: 15px;
+            text-align: left;
+        }
+        .file-item {
+            background: #edf2f7;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 5px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .file-item .remove {
+            color: #e53e3e;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .progress-text {
+            color: #4a5568;
+            margin-top: 10px;
+        }
+        .export-section {
+            text-align: center;
+            margin-top: 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -135,14 +187,22 @@
     </div>
     
     <div class="upload-zone" id="dropZone">
-        <p id="dropText">Drag & drop your Excel file here, or click to browse</p>
-        <input type="file" id="fileInput" accept=".xlsx,.xls">
-        <button class="btn" id="analyzeBtn" disabled>Analyze Job</button>
+        <p id="dropText">Drag & drop your Excel files here, or click to browse</p>
+        <input type="file" id="fileInput" accept=".xlsx,.xls" multiple>
+        <div class="file-list" id="fileList"></div>
+        <div>
+            <button class="btn" id="analyzeBtn" disabled>Analyze Jobs</button>
+        </div>
     </div>
     
     <div class="loading" id="loading">
         <div class="spinner"></div>
-        <p>Analyzing scope with AI...</p>
+        <p id="loadingText">Analyzing scope with AI...</p>
+    </div>
+    
+    <div class="export-section" id="exportSection">
+        <p>Analysis complete!</p>
+        <button class="btn btn-secondary" id="exportPdfBtn">Export All to PDF</button>
     </div>
     
     <div class="results" id="results"></div>
@@ -152,12 +212,17 @@
         const fileInput = document.getElementById('fileInput');
         const analyzeBtn = document.getElementById('analyzeBtn');
         const loading = document.getElementById('loading');
+        const loadingText = document.getElementById('loadingText');
         const results = document.getElementById('results');
         const dropText = document.getElementById('dropText');
-        let selectedFile = null;
+        const fileList = document.getElementById('fileList');
+        const exportSection = document.getElementById('exportSection');
+        const exportPdfBtn = document.getElementById('exportPdfBtn');
+        let selectedFiles = [];
+        let allResults = [];
 
         dropZone.addEventListener('click', (e) => {
-            if (e.target !== analyzeBtn) {
+            if (e.target !== analyzeBtn && e.target !== exportPdfBtn && !e.target.classList.contains('remove')) {
                 fileInput.click();
             }
         });
@@ -179,95 +244,159 @@
             e.preventDefault();
             dropZone.classList.remove('dragover');
             if (e.dataTransfer.files.length) {
-                handleFile(e.dataTransfer.files[0]);
+                addFiles(Array.from(e.dataTransfer.files));
             }
         });
         
         fileInput.addEventListener('change', () => {
             if (fileInput.files.length) {
-                handleFile(fileInput.files[0]);
+                addFiles(Array.from(fileInput.files));
             }
         });
         
-        function handleFile(file) {
-            selectedFile = file;
-            dropText.textContent = file.name;
-            analyzeBtn.disabled = false;
+        function addFiles(files) {
+            files.forEach(file => {
+                if (!selectedFiles.find(f => f.name === file.name)) {
+                    selectedFiles.push(file);
+                }
+            });
+            updateFileList();
+        }
+        
+        function removeFile(index) {
+            selectedFiles.splice(index, 1);
+            updateFileList();
+        }
+        
+        function updateFileList() {
+            if (selectedFiles.length === 0) {
+                dropText.textContent = 'Drag & drop your Excel files here, or click to browse';
+                fileList.innerHTML = '';
+                analyzeBtn.disabled = true;
+            } else {
+                dropText.textContent = `${selectedFiles.length} file(s) selected`;
+                fileList.innerHTML = selectedFiles.map((f, i) => 
+                    `<div class="file-item">
+                        <span>${f.name}</span>
+                        <span class="remove" onclick="event.stopPropagation(); removeFile(${i})">X</span>
+                    </div>`
+                ).join('');
+                analyzeBtn.disabled = false;
+            }
         }
         
         analyzeBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
+            if (selectedFiles.length === 0) return;
             
             loading.style.display = 'block';
             results.innerHTML = '';
+            exportSection.style.display = 'none';
             analyzeBtn.disabled = true;
+            allResults = [];
             
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-            
-            try {
-                const response = await fetch('/analyze', {
-                    method: 'POST',
-                    body: formData
-                });
+            for (let i = 0; i < selectedFiles.length; i++) {
+                loadingText.textContent = `Analyzing ${selectedFiles[i].name} (${i + 1}/${selectedFiles.length})...`;
                 
-                const data = await response.json();
+                const formData = new FormData();
+                formData.append('file', selectedFiles[i]);
                 
-                if (data.error) {
-                    results.innerHTML = `<div class="error-card">
-                        <strong>Error:</strong> ${data.error}
-                    </div>`;
-                } else {
-                    displayResults(data);
+                try {
+                    const response = await fetch('/analyze', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.error) {
+                        allResults.push({ filename: selectedFiles[i].name, error: data.error });
+                    } else {
+                        allResults.push(data);
+                    }
+                } catch (error) {
+                    allResults.push({ filename: selectedFiles[i].name, error: error.message });
                 }
-            } catch (error) {
-                results.innerHTML = `<div class="error-card">
-                    <strong>Error:</strong> ${error.message}
-                </div>`;
-            } finally {
-                loading.style.display = 'none';
-                analyzeBtn.disabled = false;
             }
+            
+            loading.style.display = 'none';
+            analyzeBtn.disabled = false;
+            displayAllResults();
         });
         
-        function displayResults(data) {
-            const scores = data.scores;
-            const companies = [
-                { key: 'erw_retaining_walls', name: 'ERW Retaining Walls', icon: '' },
-                { key: 'kaufman_concrete', name: 'Kaufman Concrete', icon: '' },
-                { key: 'landtec_landscape', name: 'Landtec Landscape', icon: '' },
-                { key: 'ratliff_hardscape', name: 'Ratliff Hardscape', icon: '' }
-            ];
+        function displayAllResults() {
+            let html = '';
             
-            let html = `
-                <div class="summary-card">
-                    <h3>Overall Package Assessment</h3>
-                    <div class="package-score">${scores.package_score}/5</div>
-                    <p style="text-align: center; margin-bottom: 0;">${scores.overall_recommendation}</p>
-                    <p style="text-align: center; font-size: 14px; opacity: 0.8; margin-top: 15px;">
-                        Analyzed ${data.summary.total_sheets} sheets (${data.summary.sheets_with_scope} with scope)
-                    </p>
-                </div>
-            `;
-            
-            companies.forEach(company => {
-                const companyData = scores[company.key];
+            allResults.forEach((data, index) => {
+                if (data.error) {
+                    html += `
+                        <div class="job-section">
+                            <div class="job-title">${data.filename}</div>
+                            <div class="error-card">
+                                <strong>Error:</strong> ${data.error}
+                            </div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                const scores = data.scores;
+                const companies = [
+                    { key: 'erw_retaining_walls', name: 'ERW Retaining Walls' },
+                    { key: 'kaufman_concrete', name: 'Kaufman Concrete' },
+                    { key: 'landtec_landscape', name: 'Landtec Landscape' },
+                    { key: 'ratliff_hardscape', name: 'Ratliff Hardscape' }
+                ];
+                
                 html += `
-                    <div class="company-card">
-                        <div class="company-header">
-                            <span class="company-name">${company.icon} ${company.name}</span>
-                            <div class="score score-${companyData.score}">${companyData.score}</div>
+                    <div class="job-section">
+                        <div class="job-title">
+                            <span>${data.filename}</span>
+                            <button class="btn btn-secondary" onclick="exportSinglePdf('${data.job_id}')">Export PDF</button>
                         </div>
-                        <p class="reasoning">${companyData.reasoning}</p>
-                        <div class="indicators">
-                            ${companyData.key_indicators.map(i => `<span class="indicator">${i}</span>`).join('')}
+                        <div class="summary-card">
+                            <h3>Overall Package Assessment</h3>
+                            <div class="package-score">${scores.package_score}/5</div>
+                            <p style="text-align: center; margin-bottom: 0;">${scores.overall_recommendation}</p>
+                            <p style="text-align: center; font-size: 14px; opacity: 0.8; margin-top: 15px;">
+                                Analyzed ${data.summary.total_sheets} sheets (${data.summary.sheets_with_scope} with scope)
+                            </p>
                         </div>
-                    </div>
                 `;
+                
+                companies.forEach(company => {
+                    const companyData = scores[company.key];
+                    html += `
+                        <div class="company-card">
+                            <div class="company-header">
+                                <span class="company-name">${company.name}</span>
+                                <div class="score score-${companyData.score}">${companyData.score}</div>
+                            </div>
+                            <p class="reasoning">${companyData.reasoning}</p>
+                            <div class="indicators">
+                                ${companyData.key_indicators.map(i => `<span class="indicator">${i}</span>`).join('')}
+                            </div>
+                        </div>
+                    `;
+                });
+                
+                html += `</div>`;
             });
             
             results.innerHTML = html;
+            
+            if (allResults.some(r => !r.error)) {
+                exportSection.style.display = 'block';
+            }
         }
+        
+        function exportSinglePdf(jobId) {
+            window.open(`/export-pdf/${jobId}`, '_blank');
+        }
+        
+        exportPdfBtn.addEventListener('click', () => {
+            const jobIds = allResults.filter(r => !r.error).map(r => r.job_id).join(',');
+            window.open(`/export-pdf-batch?job_ids=${jobIds}`, '_blank');
+        });
     </script>
 </body>
 </html>

@@ -1,12 +1,18 @@
 import anthropic
 import pandas as pd
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template, jsonify, Response
 import os
 import json
 import uuid
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 app = Flask(__name__)
 
@@ -249,6 +255,117 @@ def get_results(job_id):
         'summary': result['summary'],
         'scores': result['scores']
     })
+
+def generate_pdf(job_results_list):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=18, spaceAfter=20, textColor=colors.HexColor('#1a365d'))
+    heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, textColor=colors.HexColor('#2c5282'))
+    normal_style = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=10, spaceAfter=6)
+    
+    story = []
+    
+    story.append(Paragraph("ERW Job Scoring Report", title_style))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", normal_style))
+    story.append(Spacer(1, 20))
+    
+    companies = [
+        ('erw_retaining_walls', 'ERW Retaining Walls'),
+        ('kaufman_concrete', 'Kaufman Concrete'),
+        ('landtec_landscape', 'Landtec Landscape'),
+        ('ratliff_hardscape', 'Ratliff Hardscape')
+    ]
+    
+    for job in job_results_list:
+        story.append(Paragraph(f"Job: {job['filename']}", heading_style))
+        
+        summary = job['summary']
+        story.append(Paragraph(f"Sheets analyzed: {summary['total_sheets']} ({summary['sheets_with_scope']} with scope)", normal_style))
+        
+        scores = job['scores']
+        story.append(Paragraph(f"<b>Package Score: {scores['package_score']}/5</b>", normal_style))
+        story.append(Paragraph(f"{scores['overall_recommendation']}", normal_style))
+        story.append(Spacer(1, 10))
+        
+        table_data = [['Company', 'Score', 'Reasoning']]
+        for key, name in companies:
+            company_data = scores[key]
+            reasoning = company_data['reasoning'][:100] + '...' if len(company_data['reasoning']) > 100 else company_data['reasoning']
+            table_data.append([name, f"{company_data['score']}/5", reasoning])
+        
+        table = Table(table_data, colWidths=[1.8*inch, 0.7*inch, 4.5*inch])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f7fafc')),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 30))
+    
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+@app.route('/export-pdf/<job_id>')
+def export_single_pdf(job_id):
+    result = get_job_result(job_id)
+    if not result:
+        return jsonify({'error': 'Job not found'}), 404
+    
+    job_data = {
+        'filename': result['filename'],
+        'summary': result['summary'],
+        'scores': result['scores']
+    }
+    
+    pdf_buffer = generate_pdf([job_data])
+    
+    return Response(
+        pdf_buffer.getvalue(),
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename=ERW_Score_{result["filename"].replace(".xlsx", "").replace(".xls", "")}.pdf'}
+    )
+
+@app.route('/export-pdf-batch')
+def export_batch_pdf():
+    job_ids = request.args.get('job_ids', '').split(',')
+    job_ids = [jid.strip() for jid in job_ids if jid.strip()]
+    
+    if not job_ids:
+        return jsonify({'error': 'No job IDs provided'}), 400
+    
+    job_results_list = []
+    for job_id in job_ids:
+        result = get_job_result(job_id)
+        if result:
+            job_results_list.append({
+                'filename': result['filename'],
+                'summary': result['summary'],
+                'scores': result['scores']
+            })
+    
+    if not job_results_list:
+        return jsonify({'error': 'No jobs found'}), 404
+    
+    pdf_buffer = generate_pdf(job_results_list)
+    
+    return Response(
+        pdf_buffer.getvalue(),
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename=ERW_Batch_Scores_{datetime.now().strftime("%Y%m%d")}.pdf'}
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
