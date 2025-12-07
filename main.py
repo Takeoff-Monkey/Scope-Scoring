@@ -204,36 +204,79 @@ Respond with ONLY a JSON object in this exact format:
 def index():
     return render_template('index.html')
 
+def combine_scope_data(scope_data_list):
+    """Combine scope data from multiple files into a single summary."""
+    combined = {
+        'total_sheets': 0,
+        'sheets_with_scope': 0,
+        'scope_indicator_counts': {},
+        'sheet_details': []
+    }
+    
+    for scope_data in scope_data_list:
+        combined['total_sheets'] += scope_data['total_sheets']
+        combined['sheets_with_scope'] += scope_data['sheets_with_scope']
+        
+        for indicator, count in scope_data['scope_indicator_counts'].items():
+            combined['scope_indicator_counts'][indicator] = combined['scope_indicator_counts'].get(indicator, 0) + count
+        
+        combined['sheet_details'].extend(scope_data['sheet_details'])
+    
+    combined['sheet_details'] = combined['sheet_details'][:50]
+    
+    return combined
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+    files = request.files.getlist('file')
     
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({'error': 'No files uploaded'}), 400
+    
+    valid_files = [f for f in files if f.filename != '']
+    
+    if not valid_files:
+        return jsonify({'error': 'No valid files selected'}), 400
     
     try:
-        df = pd.read_excel(file)
-        df = normalize_columns(df)
+        scope_data_list = []
+        filenames = []
         
-        scope_data = prepare_scope_summary(df)
+        for file in valid_files:
+            df = pd.read_excel(file)
+            df = normalize_columns(df)
+            scope_data = prepare_scope_summary(df)
+            scope_data_list.append(scope_data)
+            filenames.append(file.filename)
         
-        scores = score_job(scope_data)
+        if len(scope_data_list) == 1:
+            combined_scope = scope_data_list[0]
+        else:
+            combined_scope = combine_scope_data(scope_data_list)
+        
+        scores = score_job(combined_scope)
         
         job_id = str(uuid.uuid4())[:8]
+        
+        if len(filenames) == 1:
+            display_filename = filenames[0]
+        else:
+            display_filename = f"{len(filenames)} files: {', '.join(filenames)}"
+        
         summary = {
-            'total_sheets': scope_data['total_sheets'],
-            'sheets_with_scope': scope_data['sheets_with_scope'],
-            'scope_counts': scope_data['scope_indicator_counts']
+            'total_sheets': combined_scope['total_sheets'],
+            'sheets_with_scope': combined_scope['sheets_with_scope'],
+            'scope_counts': combined_scope['scope_indicator_counts'],
+            'files_analyzed': filenames
         }
         
-        save_job_result(job_id, file.filename, summary, scores)
+        save_job_result(job_id, display_filename, summary, scores)
         
         return jsonify({
             'success': True,
             'job_id': job_id,
-            'filename': file.filename,
+            'filename': display_filename,
+            'files_analyzed': filenames,
             'analyzed_at': datetime.now().isoformat(),
             'summary': summary,
             'scores': scores

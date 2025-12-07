@@ -34,7 +34,10 @@ A Flask application that analyzes scope extractor output (Excel files) and score
 ```
 
 ## Running the Application
-The app runs on port 5000. Upload an Excel file with scope extractor output to get AI-powered scoring for each ERW company.
+The app runs on port 5000. Upload Excel files with scope extractor output to get AI-powered scoring for each ERW company.
+
+## Multi-File Upload
+When multiple files are uploaded, they are treated as belonging to the same job. The system combines all scope data from all files and provides a single consolidated assessment. This is useful when a project's scope is split across multiple Excel files (e.g., Civils and DDS extracts for the same job).
 
 ## Input File Formats
 Supports both Civils-style and DDS-style scope extractor Excel formats with columns for sheet info and scope indicators like Retaining walls, Concrete flatwork, Irrigation, Pavers, etc.

@@ -294,28 +294,33 @@
             analyzeBtn.disabled = true;
             allResults = [];
             
-            for (let i = 0; i < selectedFiles.length; i++) {
-                loadingText.textContent = `Analyzing ${selectedFiles[i].name} (${i + 1}/${selectedFiles.length})...`;
+            const fileNames = selectedFiles.map(f => f.name).join(', ');
+            if (selectedFiles.length === 1) {
+                loadingText.textContent = `Analyzing ${selectedFiles[0].name}...`;
+            } else {
+                loadingText.textContent = `Analyzing ${selectedFiles.length} files as one job...`;
+            }
+            
+            const formData = new FormData();
+            selectedFiles.forEach(file => {
+                formData.append('file', file);
+            });
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
                 
-                const formData = new FormData();
-                formData.append('file', selectedFiles[i]);
+                const data = await response.json();
                 
-                try {
-                    const response = await fetch('/analyze', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const data = await response.json();
-                    
-                    if (data.error) {
-                        allResults.push({ filename: selectedFiles[i].name, error: data.error });
-                    } else {
-                        allResults.push(data);
-                    }
-                } catch (error) {
-                    allResults.push({ filename: selectedFiles[i].name, error: error.message });
+                if (data.error) {
+                    allResults.push({ filename: fileNames, error: data.error });
+                } else {
+                    allResults.push(data);
                 }
+            } catch (error) {
+                allResults.push({ filename: fileNames, error: error.message });
             }
             
             loading.style.display = 'none';
@@ -347,10 +352,15 @@
                     { key: 'ratliff_hardscape', name: 'Ratliff Hardscape' }
                 ];
                 
+                const filesAnalyzed = data.files_analyzed || [data.filename];
+                const fileLabel = filesAnalyzed.length > 1 
+                    ? `Combined Analysis (${filesAnalyzed.length} files)` 
+                    : data.filename;
+                
                 html += `
                     <div class="job-section">
                         <div class="job-title">
-                            <span>${data.filename}</span>
+                            <span>${fileLabel}</span>
                             <button class="btn btn-secondary" onclick="exportSinglePdf('${data.job_id}')">Export PDF</button>
                         </div>
                         <div class="summary-card">
@@ -360,6 +370,11 @@
                             <p style="text-align: center; font-size: 14px; opacity: 0.8; margin-top: 15px;">
                                 Analyzed ${data.summary.total_sheets} sheets (${data.summary.sheets_with_scope} with scope)
                             </p>
+                            ${filesAnalyzed.length > 1 ? `
+                            <p style="text-align: center; font-size: 12px; opacity: 0.7; margin-top: 10px;">
+                                Files: ${filesAnalyzed.join(', ')}
+                            </p>
+                            ` : ''}
                         </div>
                 `;
                 
