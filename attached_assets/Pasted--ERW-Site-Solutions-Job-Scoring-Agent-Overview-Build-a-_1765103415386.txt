@@ -1,0 +1,614 @@
+# ERW Site Solutions - Job Scoring Agent
+
+## Overview
+
+Build a Flask application that analyzes scope extractor output (Excel files) and scores each job for relevance to ERW Site Solutions' four operating companies. The app uses Claude AI to intelligently score jobs based on the extracted scope data.
+
+## About ERW Site Solutions
+
+ERW Site Solutions is a Texas-based construction company offering turnkey Division 32 exterior improvements. They operate as a family of four specialized companies:
+
+1. **ERW Retaining Walls** - Gravity & mechanically stabilized earth (MSE) retaining walls, engineered wall systems
+2. **Kaufman Concrete** - Single-family concrete foundations, concrete flatwork for high-volume builders
+3. **Landtec Landscape** - Landscape installation, irrigation systems, landscape maintenance, site services
+4. **Ratliff Hardscape** - Hardscape, amenity centers, pools, pavers, outdoor living spaces, construction management
+
+**Important Context**: These are large-scale commercial contractors typically pursuing projects **>$250k per company division**. They work on master-planned communities, multi-family developments, municipal parks, commercial properties, and large residential subdivisions.
+
+## Scoring System (0-5)
+
+Each company gets an independent score:
+
+| Score | Meaning | Typical Indicators |
+|-------|---------|-------------------|
+| **0** | No meaningful scope | No relevant scope items marked; nothing they would typically pursue |
+| **1** | Minimal scope | Some relevant items but clearly under $250k minimum; useful only to complete a package deal |
+| **2** | Light scope | Moderate presence of relevant items; borderline viability, possibly $100-250k range |
+| **3** | Decent scope | Good amount of relevant work; likely meets $250k threshold; worth pursuing |
+| **4** | Strong scope | Significant scope clearly exceeding $250k; high-priority opportunity |
+| **5** | Excellent scope | Major scope with extensive work; >$500k+ potential; top-tier opportunity |
+
+## Input Data Format
+
+The scope extractor outputs Excel files with these columns:
+
+**Civils-style format:**
+- `pdf_page`, `sheet_number`, `title`, `scale`, `scope_summary`, `density`, `estimated_takeoff_time`
+- Scope indicator columns (marked with "X" when present): `Aggregates / gravel`, `Concrete flatwork`, `Fencing`, `Furnishings`, `Irrigation`, `Pavers`, `Retaining walls`, `Softscape (landscape planting)`, `Synthetic turf`
+
+**DDS-style format:**
+- `Page`, `Sheet Number`, `Title`, `Scale`, `Scope Summary`, `Density`, `Est. Takeoff Time`
+- Scope indicator columns: `Softscape (landscape planting)`, `Irrigation`, `Drainage`, `Lighting`, `BMP / Environmental / Bioswales`, `Fencing`, `Pavers`, `Concrete flatwork`, `Retaining walls`, `Synthetic turf`, `Aggregates / gravel`, `Furnishings`
+
+## Company-Specific Scope Mapping
+
+### ERW Retaining Walls
+**Primary indicators:** `Retaining walls`
+**Secondary indicators (from scope_summary):** MSE walls, gravity walls, segmental walls, boulder walls, gabion walls, cut/fill requiring walls, grade changes >4ft, tiered walls, structural walls, soil nail walls
+
+### Kaufman Concrete
+**Primary indicators:** `Concrete flatwork`
+**Secondary indicators (from scope_summary):** sidewalks, curb and gutter, concrete paving, slabs, foundations, driveways, concrete pavement, reinforced concrete, monolithic curb, valley gutters, ADA ramps, concrete steps
+
+### Landtec Landscape
+**Primary indicators:** `Softscape (landscape planting)`, `Irrigation`, `Synthetic turf`
+**Secondary indicators (from scope_summary):** trees, shrubs, sod, turf, plant material, planting beds, mulch, native plantings, seed, hydroseeding, drip irrigation, spray heads, controllers, mainline, laterals, landscape maintenance
+
+### Ratliff Hardscape
+**Primary indicators:** `Pavers`, `Aggregates / gravel`, `Furnishings`
+**Secondary indicators (from scope_summary):** pavers, permeable pavers, stone, flagstone, decomposed granite, crushed stone, outdoor kitchens, fire pits, pergolas, shade structures, pools, spas, water features, fountains, seating walls, site furnishings, benches, tables, trash receptacles, bike racks, planters, bollards, playground equipment, amenity centers, pavilions, outdoor lighting (decorative)
+
+## Application Requirements
+
+### Tech Stack
+- Flask (Python web framework)
+- pandas (Excel processing)
+- Anthropic Claude API (AI scoring)
+- Simple HTML/CSS frontend
+
+### Endpoints
+
+1. **`GET /`** - Upload page with file input
+2. **`POST /analyze`** - Process uploaded Excel file, return scores
+3. **`GET /results/<job_id>`** - View detailed results for a processed job
+
+### Core Logic
+
+```python
+import anthropic
+import pandas as pd
+from flask import Flask, request, render_template, jsonify
+import os
+import json
+
+app = Flask(__name__)
+client = anthropic.Anthropic()
+
+def normalize_columns(df):
+    """Normalize column names to handle both file formats"""
+    column_mapping = {
+        'Page': 'pdf_page',
+        'Sheet Number': 'sheet_number', 
+        'Title': 'title',
+        'Scale': 'scale',
+        'Scope Summary': 'scope_summary',
+        'Density': 'density',
+        'Est. Takeoff Time': 'estimated_takeoff_time'
+    }
+    df.columns = [column_mapping.get(col, col) for col in df.columns]
+    return df
+
+def prepare_scope_summary(df):
+    """Create a comprehensive summary of all scope items for Claude to analyze"""
+    
+    # Get sheets with actual scope (non-empty scope indicators)
+    scope_columns = [
+        'Aggregates / gravel', 'Concrete flatwork', 'Fencing', 'Furnishings',
+        'Irrigation', 'Pavers', 'Retaining walls', 'Softscape (landscape planting)',
+        'Synthetic turf', 'Drainage', 'Lighting', 'BMP / Environmental / Bioswales'
+    ]
+    
+    existing_scope_cols = [c for c in scope_columns if c in df.columns]
+    
+    # Count scope indicators
+    scope_counts = {}
+    for col in existing_scope_cols:
+        count = df[col].notna().sum()
+        if count > 0:
+            scope_counts[col] = int(count)
+    
+    # Collect scope summaries from sheets with actual work
+    sheets_with_scope = df[df[existing_scope_cols].notna().any(axis=1)]
+    
+    scope_summaries = []
+    for _, row in sheets_with_scope.iterrows():
+        sheet_info = f"Sheet {row.get('sheet_number', 'N/A')}: {row.get('title', 'N/A')}"
+        summary = row.get('scope_summary', '')
+        density = row.get('density', '')
+        
+        # Which scope items are marked on this sheet
+        marked_items = [col for col in existing_scope_cols if pd.notna(row.get(col))]
+        
+        scope_summaries.append({
+            'sheet': sheet_info,
+            'summary': summary,
+            'density': density,
+            'marked_scope': marked_items
+        })
+    
+    return {
+        'total_sheets': len(df),
+        'sheets_with_scope': len(sheets_with_scope),
+        'scope_indicator_counts': scope_counts,
+        'sheet_details': scope_summaries[:50]  # Limit to avoid token overload
+    }
+
+def score_job(scope_data):
+    """Use Claude to score the job for each ERW company"""
+    
+    prompt = f"""You are an expert construction estimator familiar with ERW Site Solutions, a Texas-based exterior improvements contractor. Analyze this scope extractor output and score the job for each of their four companies.
+
+## Scope Data Summary
+
+**Total sheets analyzed:** {scope_data['total_sheets']}
+**Sheets with identifiable scope:** {scope_data['sheets_with_scope']}
+
+**Scope indicator counts across all sheets:**
+{json.dumps(scope_data['scope_indicator_counts'], indent=2)}
+
+**Detailed sheet-by-sheet scope (showing sheets with marked scope items):**
+{json.dumps(scope_data['sheet_details'], indent=2)}
+
+## Scoring Instructions
+
+Score each company from 0-5 based on:
+- **0**: No meaningful scope for this company
+- **1**: Minimal scope, clearly under $250k, only useful to complete a package
+- **2**: Light scope, borderline viability ($100-250k range)
+- **3**: Decent scope, likely meets $250k threshold, worth pursuing
+- **4**: Strong scope, clearly exceeds $250k, high priority
+- **5**: Excellent scope, major opportunity ($500k+), top tier
+
+## Company Scope Mapping
+
+**ERW Retaining Walls**: Look for `Retaining walls` indicators and mentions of MSE walls, gravity walls, boulder walls, grade changes, tiered walls, structural walls in summaries.
+
+**Kaufman Concrete**: Look for `Concrete flatwork` indicators and mentions of sidewalks, curb/gutter, concrete paving, driveways, ADA ramps, concrete steps, reinforced concrete in summaries.
+
+**Landtec Landscape**: Look for `Softscape (landscape planting)`, `Irrigation`, `Synthetic turf` indicators and mentions of trees, shrubs, sod, planting, mulch, irrigation systems in summaries.
+
+**Ratliff Hardscape**: Look for `Pavers`, `Aggregates / gravel`, `Furnishings` indicators and mentions of pavers, stone, decomposed granite, site furnishings, benches, water features, pools, outdoor amenities, pavilions, playground equipment in summaries.
+
+## Important Considerations
+
+1. **Sheet count matters**: More sheets with scope = larger project
+2. **Density ratings**: "High" density sheets have more work than "Low" density
+3. **Cross-reference summaries**: The scope_summary often contains details not captured in indicator columns
+4. **Package value**: Even if one company has low scope, it might still be valuable to complete a turnkey package
+
+Respond with ONLY a JSON object in this exact format:
+{{
+    "erw_retaining_walls": {{
+        "score": <0-5>,
+        "reasoning": "<brief explanation of score>",
+        "key_indicators": ["<specific items found>"]
+    }},
+    "kaufman_concrete": {{
+        "score": <0-5>,
+        "reasoning": "<brief explanation of score>",
+        "key_indicators": ["<specific items found>"]
+    }},
+    "landtec_landscape": {{
+        "score": <0-5>,
+        "reasoning": "<brief explanation of score>",
+        "key_indicators": ["<specific items found>"]
+    }},
+    "ratliff_hardscape": {{
+        "score": <0-5>,
+        "reasoning": "<brief explanation of score>",
+        "key_indicators": ["<specific items found>"]
+    }},
+    "overall_recommendation": "<1-2 sentence summary of opportunity>",
+    "package_score": <0-5 overall attractiveness as turnkey package>
+}}"""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+    
+    # Parse the JSON response
+    response_text = message.content[0].text
+    # Clean up potential markdown formatting
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0]
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0]
+    
+    return json.loads(response_text.strip())
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    try:
+        # Read the Excel file
+        df = pd.read_excel(file)
+        df = normalize_columns(df)
+        
+        # Prepare scope summary
+        scope_data = prepare_scope_summary(df)
+        
+        # Get AI scores
+        scores = score_job(scope_data)
+        
+        return jsonify({
+            'success': True,
+            'filename': file.filename,
+            'summary': {
+                'total_sheets': scope_data['total_sheets'],
+                'sheets_with_scope': scope_data['sheets_with_scope'],
+                'scope_counts': scope_data['scope_indicator_counts']
+            },
+            'scores': scores
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
+```
+
+### HTML Template (templates/index.html)
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ERW Job Scorer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 { color: #1a365d; margin-bottom: 5px; }
+        .header p { color: #666; }
+        .upload-zone {
+            background: white;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        .upload-zone:hover { border-color: #4299e1; }
+        .upload-zone.dragover { border-color: #4299e1; background: #ebf8ff; }
+        input[type="file"] { display: none; }
+        .btn {
+            background: #4299e1;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 15px;
+        }
+        .btn:hover { background: #3182ce; }
+        .btn:disabled { background: #a0aec0; cursor: not-allowed; }
+        .results { margin-top: 30px; }
+        .company-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .company-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .company-name { font-weight: 600; font-size: 18px; }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .score-0 { background: #718096; }
+        .score-1 { background: #e53e3e; }
+        .score-2 { background: #ed8936; }
+        .score-3 { background: #ecc94b; color: #1a202c; }
+        .score-4 { background: #48bb78; }
+        .score-5 { background: #38a169; }
+        .reasoning { color: #4a5568; margin-bottom: 10px; }
+        .indicators {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .indicator {
+            background: #edf2f7;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #4a5568;
+        }
+        .summary-card {
+            background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
+            color: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        .summary-card h3 { margin-top: 0; }
+        .package-score {
+            font-size: 48px;
+            font-weight: bold;
+            text-align: center;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            display: none;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4299e1;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>ERW Job Scorer</h1>
+        <p>Upload scope extractor output to score opportunities for ERW Site Solutions</p>
+    </div>
+    
+    <div class="upload-zone" id="dropZone">
+        <p>📁 Drag & drop your Excel file here, or click to browse</p>
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+        <button class="btn" id="analyzeBtn" disabled>Analyze Job</button>
+    </div>
+    
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <p>Analyzing scope with Claude AI...</p>
+    </div>
+    
+    <div class="results" id="results"></div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+        let selectedFile = null;
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                handleFile(fileInput.files[0]);
+            }
+        });
+        
+        function handleFile(file) {
+            selectedFile = file;
+            dropZone.querySelector('p').textContent = `📄 ${file.name}`;
+            analyzeBtn.disabled = false;
+        }
+        
+        analyzeBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            
+            loading.style.display = 'block';
+            results.innerHTML = '';
+            analyzeBtn.disabled = true;
+            
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    results.innerHTML = `<div class="company-card" style="border-left: 4px solid #e53e3e;">
+                        <strong>Error:</strong> ${data.error}
+                    </div>`;
+                } else {
+                    displayResults(data);
+                }
+            } catch (error) {
+                results.innerHTML = `<div class="company-card" style="border-left: 4px solid #e53e3e;">
+                    <strong>Error:</strong> ${error.message}
+                </div>`;
+            } finally {
+                loading.style.display = 'none';
+                analyzeBtn.disabled = false;
+            }
+        });
+        
+        function displayResults(data) {
+            const scores = data.scores;
+            const companies = [
+                { key: 'erw_retaining_walls', name: 'ERW Retaining Walls', icon: '🧱' },
+                { key: 'kaufman_concrete', name: 'Kaufman Concrete', icon: '🏗️' },
+                { key: 'landtec_landscape', name: 'Landtec Landscape', icon: '🌳' },
+                { key: 'ratliff_hardscape', name: 'Ratliff Hardscape', icon: '🪨' }
+            ];
+            
+            let html = `
+                <div class="summary-card">
+                    <h3>📊 Overall Package Assessment</h3>
+                    <div class="package-score">${scores.package_score}/5</div>
+                    <p style="text-align: center; margin-bottom: 0;">${scores.overall_recommendation}</p>
+                    <p style="text-align: center; font-size: 14px; opacity: 0.8; margin-top: 15px;">
+                        Analyzed ${data.summary.total_sheets} sheets (${data.summary.sheets_with_scope} with scope)
+                    </p>
+                </div>
+            `;
+            
+            companies.forEach(company => {
+                const companyData = scores[company.key];
+                html += `
+                    <div class="company-card">
+                        <div class="company-header">
+                            <span class="company-name">${company.icon} ${company.name}</span>
+                            <div class="score score-${companyData.score}">${companyData.score}</div>
+                        </div>
+                        <p class="reasoning">${companyData.reasoning}</p>
+                        <div class="indicators">
+                            ${companyData.key_indicators.map(i => `<span class="indicator">${i}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            results.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
+```
+
+## Replit Configuration
+
+### replit.nix
+```nix
+{pkgs}: {
+  deps = [
+    pkgs.python311
+    pkgs.python311Packages.pip
+  ];
+}
+```
+
+### pyproject.toml
+```toml
+[tool.poetry]
+name = "erw-job-scorer"
+version = "0.1.0"
+description = "Job scoring agent for ERW Site Solutions"
+authors = ["Your Name"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+flask = "^3.0.0"
+pandas = "^2.1.0"
+anthropic = "^0.40.0"
+openpyxl = "^3.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+```
+
+### .replit
+```toml
+run = "python main.py"
+entrypoint = "main.py"
+
+[deployment]
+run = ["python", "main.py"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+```
+
+## Environment Variables
+
+Set in Replit Secrets:
+- `ANTHROPIC_API_KEY` - Your Anthropic API key
+
+## Directory Structure
+
+```
+/
+├── main.py
+├── templates/
+│   └── index.html
+├── .replit
+├── replit.nix
+└── pyproject.toml
+```
+
+## Testing
+
+1. Upload one of the sample Excel files (civils or DDS format)
+2. Verify scores align with expectations:
+   - The civils file should show strong Kaufman (concrete) scores due to extensive street infrastructure
+   - The DDS file should show strong Landtec (landscape) and Ratliff (hardscape) scores due to park amenities
+
+## Future Enhancements
+
+1. **Batch processing** - Upload multiple files at once
+2. **Historical calibration** - Track actual project values vs predictions to improve scoring
+3. **Company-specific thresholds** - Allow adjusting the $250k minimum per company
+4. **Export to CRM** - Push scored leads to Monday.com or Salesforce
+5. **Confidence indicators** - Show how confident the AI is in each score
+6. **Scope detail drilldown** - Click to see which specific sheets contributed to each score
