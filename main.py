@@ -307,6 +307,8 @@ def generate_pdf(job_results_list):
     title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=18, spaceAfter=20, textColor=colors.HexColor('#1a365d'))
     heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, textColor=colors.HexColor('#2c5282'))
     normal_style = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=10, spaceAfter=6)
+    cell_style = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=9, leading=12)
+    header_cell_style = ParagraphStyle('HeaderCell', parent=styles['Normal'], fontSize=10, textColor=colors.white, fontName='Helvetica-Bold')
     
     story = []
     
@@ -332,24 +334,31 @@ def generate_pdf(job_results_list):
         story.append(Paragraph(f"{scores['overall_recommendation']}", normal_style))
         story.append(Spacer(1, 10))
         
-        table_data = [['Company', 'Score', 'Reasoning']]
+        table_data = [[
+            Paragraph('Company', header_cell_style),
+            Paragraph('Score', header_cell_style),
+            Paragraph('Reasoning', header_cell_style)
+        ]]
         for key, name in companies:
             company_data = scores[key]
-            reasoning = company_data['reasoning'][:100] + '...' if len(company_data['reasoning']) > 100 else company_data['reasoning']
-            table_data.append([name, f"{company_data['score']}/5", reasoning])
+            reasoning = company_data['reasoning']
+            table_data.append([
+                Paragraph(name, cell_style),
+                Paragraph(f"{company_data['score']}/5", cell_style),
+                Paragraph(reasoning, cell_style)
+            ])
         
-        table = Table(table_data, colWidths=[1.8*inch, 0.7*inch, 4.5*inch])
+        table = Table(table_data, colWidths=[1.5*inch, 0.6*inch, 5*inch])
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('ALIGN', (1, 0), (1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('TOPPADDING', (0, 1), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+            ('TOPPADDING', (0, 0), (-1, 0), 10),
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
             ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f7fafc')),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
