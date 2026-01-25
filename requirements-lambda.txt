@@ -1,0 +1,18 @@
+# AWS Lambda dependencies for ERW Job Scorer
+
+# AI/ML
+anthropic>=0.75.0
+
+# Data processing
+pandas>=2.3.3
+openpyxl>=3.1.5
+
+# Google Drive API
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+
+# PDF generation (optional but included for full functionality)
+reportlab>=4.4.5
+
+# Database (optional - only needed if save_to_db=true)
+psycopg2-binary>=2.9.11
