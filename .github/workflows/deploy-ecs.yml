@@ -1,4 +1,4 @@
-name: Deploy Lambda to ECR
+name: Deploy ECS Task to ECR
 
 on:
   workflow_dispatch:
@@ -82,6 +82,6 @@ jobs:
           echo "Timestamp tag: ${{ steps.build-image.outputs.timestamp }}"
           echo ""
           echo "Next steps:"
-          echo "1. Update your Lambda function to use the new image"
-          echo "2. Verify the Lambda function is working correctly"
+          echo "1. Update your ECS task definition to use the new image"
+          echo "2. Verify the ECS task runs correctly via Step Functions"
           echo "============================================"

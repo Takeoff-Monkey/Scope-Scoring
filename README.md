@@ -117,87 +117,88 @@ Jobs are scored on a 0-5 scale based on estimated scope value:
 
 ```
 Scope-Scoring/
-├── main.py                  # Flask backend application
-├── lambda_handler.py        # AWS Lambda handler (headless)
-├── Dockerfile               # Docker image for Lambda
-├── requirements-lambda.txt  # Lambda-specific dependencies
+├── main.py                        # Flask web application
+├── scorer.py                      # ECS Fargate task entrypoint (headless)
+├── Dockerfile                     # Container image definition
+├── requirements.txt               # Container dependencies
+├── push-to-ecr.sh                 # Local ECR deployment script
+├── .github/workflows/
+│   └── deploy-ecs.yml             # GitHub Action for CI/CD
 ├── templates/
-│   └── index.html           # Web UI
-├── pyproject.toml           # Python dependencies
-├── uv.lock                  # Dependency lock file
-└── README.md                # This file
+│   └── index.html                 # Web UI
+├── pyproject.toml                 # Web app dependencies
+├── uv.lock                        # Dependency lock file
+└── README.md                      # This file
 ```
 
-## AWS Lambda Deployment
+## ECS Fargate Deployment
 
-The scorer can run as a headless AWS Lambda function in a Docker container. Files are fetched from Google Drive.
-
-### Building the Docker Image
-
-```bash
-docker build -t erw-job-scorer .
-```
-
-### Pushing to Amazon ECR
-
-```bash
-# Authenticate with ECR
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
-
-# Tag and push
-docker tag erw-job-scorer:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/erw-job-scorer:latest
-docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/erw-job-scorer:latest
-```
+The scorer runs as a headless ECS Fargate task invoked by AWS Step Functions using the WAIT_FOR_TASK (callback) pattern. Unlike Lambda, there is no runtime limit, making it suitable for large Excel files. Files are fetched from Google Drive.
 
 ### Google Drive Setup
 
 1. Create a Google Cloud project and enable the Google Drive API
-2. Create a service account and download the JSON credentials
-3. Share the Google Drive files/folders with the service account email
-4. Base64-encode the credentials JSON for the environment variable:
+2. Create a service account and download the JSON credentials key file
+3. Share the target Drive files with the service account email address
+4. Base64-encode the credentials for storage as an environment variable:
    ```bash
    base64 -i service-account.json
    ```
 
-### Lambda Configuration
+### Container Environment Variables
 
-**Environment Variables:**
+**Configured in the ECS task definition (static):**
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic API key for Claude | Yes |
-| `GOOGLE_CREDENTIALS_JSON` | Base64-encoded service account JSON | Yes |
-| `GOOGLE_DRIVE_FILE_IDS` | Comma-separated Google Drive file IDs | Yes |
-| `DATABASE_URL` | PostgreSQL connection string | No |
-| `GENERATE_PDF` | Set to "true" to include PDF in response | No |
-| `SAVE_TO_DB` | Set to "true" to persist results | No |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude |
+| `GOOGLE_CREDENTIALS_JSON` | Yes | Base64-encoded service account JSON |
+| `DATABASE_URL` | No | PostgreSQL connection string |
+| `S3_BUCKET` | No | S3 bucket name for writing results JSON |
 
-**Recommended Settings:**
+**Passed via Step Functions `containerOverrides` (per invocation):**
 
-- Memory: 512 MB minimum (1024 MB recommended for large files)
-- Timeout: 60 seconds minimum (120 seconds recommended)
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GOOGLE_DRIVE_FILE_IDS` | Yes | Comma-separated Google Drive file IDs |
+| `TASK_TOKEN` | No | Step Functions callback token for `SendTaskSuccess`/`SendTaskFailure` |
+| `GENERATE_PDF` | No | Set to `"true"` to include PDF as base64 in result |
+| `SAVE_TO_DB` | No | Set to `"true"` to persist results to PostgreSQL |
 
-### Lambda Event Format (Optional Overrides)
+### Step Functions Integration
 
-The Lambda reads configuration from environment variables by default, but you can override via the event:
+The container uses the WAIT_FOR_TASK callback pattern:
 
-```json
-{
-    "file_ids": ["1ABC123...", "1DEF456..."],
-    "save_to_db": false,
-    "generate_pdf": true
-}
+1. Step Functions starts the ECS task via a `Run a Job (.sync)` or `Wait for a Callback (.waitForTaskToken)` state, passing `TASK_TOKEN` via `containerOverrides`
+2. The task downloads files, scores the job, and calls `SendTaskSuccess` with the result JSON
+3. If an error occurs (or the container receives SIGTERM), it calls `SendTaskFailure`
+
+### ECS Task Protection
+
+The container enables ECS scale-in protection when processing begins and disables it on completion or failure, preventing ECS from terminating the task mid-run. Protection automatically expires after 120 minutes as a safety fallback.
+
+### Building and Deploying
+
+```bash
+# Build locally
+docker build -t erw-job-scorer .
+
+# Push to ECR using the helper script
+./push-to-ecr.sh
+
+# Or trigger the GitHub Action (Actions → Deploy ECS Task to ECR → Run workflow)
 ```
 
-### Lambda Response Format
+### Output — SendTaskSuccess Payload
 
 ```json
 {
-    "success": true,
+    "status": "completed",
     "job_id": "abc12345",
     "filename": "project.xlsx",
     "files_analyzed": ["project.xlsx"],
     "analyzed_at": "2024-01-15T10:30:00",
+    "processing_time_seconds": 42.1,
     "summary": {
         "total_sheets": 45,
         "sheets_with_scope": 12,
@@ -212,23 +213,27 @@ The Lambda reads configuration from environment variables by default, but you ca
         "overall_recommendation": "...",
         "package_score": 3
     },
-    "pdf_base64": "..."
+    "s3_key": "results/abc12345.json",
+    "s3_bucket": "my-results-bucket"
 }
 ```
 
 ### Local Testing
 
 ```bash
-# Set environment variables
 export ANTHROPIC_API_KEY=sk-ant-...
 export GOOGLE_CREDENTIALS_JSON=$(base64 -i service-account.json)
 export GOOGLE_DRIVE_FILE_IDS=1ABC123...,1DEF456...
 
-# Run the handler
-python lambda_handler.py
+# Run without TASK_TOKEN — skips Step Functions callback, prints result to stdout
+python scorer.py
 
-# Or pass file IDs as arguments
-python lambda_handler.py 1ABC123... 1DEF456...
+# Or via Docker
+docker run \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e GOOGLE_CREDENTIALS_JSON="$GOOGLE_CREDENTIALS_JSON" \
+  -e GOOGLE_DRIVE_FILE_IDS="$GOOGLE_DRIVE_FILE_IDS" \
+  erw-job-scorer
 ```
 
 ## Usage

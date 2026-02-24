@@ -1,0 +1,22 @@
+# ECS container dependencies for ERW Job Scorer
+
+# AI
+anthropic>=0.75.0
+
+# Data processing
+pandas>=2.3.3
+openpyxl>=3.1.5
+
+# Google Drive API
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+
+# AWS SDK (Step Functions, S3, ECS task protection)
+boto3>=1.34.0
+requests>=2.31.0
+
+# PDF generation (optional)
+reportlab>=4.4.5
+
+# Database (optional)
+psycopg2-binary>=2.9.11

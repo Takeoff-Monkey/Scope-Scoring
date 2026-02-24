@@ -1,20 +1,18 @@
-# AWS Lambda Container Image for ERW Job Scorer
-FROM public.ecr.aws/lambda/python:3.11
+# ECS Fargate container image for ERW Job Scorer
+FROM python:3.11-slim
 
-# Install system dependencies for pandas and reportlab
-RUN dnf install -y \
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    python3-devel \
-    && dnf clean all
-
-# Copy requirements file
-COPY requirements-lambda.txt ${LAMBDA_TASK_ROOT}/
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-lambda.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the Lambda handler
-COPY lambda_handler.py ${LAMBDA_TASK_ROOT}/
+# Copy the scorer entrypoint
+COPY scorer.py .
 
-# Set the CMD to the Lambda handler
-CMD [ "lambda_handler.lambda_handler" ]
+CMD ["python", "scorer.py"]
