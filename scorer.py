@@ -2,21 +2,22 @@
 ECS Fargate task entrypoint for ERW Job Scorer.
 
 Runs as a standalone container invoked by AWS Step Functions using the
-WAIT_FOR_TASK (callback) pattern. Configuration is read entirely from
-environment variables — static ones baked into the ECS task definition
-and per-invocation ones injected via Step Functions containerOverrides.
+WAIT_FOR_TASK (callback) pattern. Reads Scope Extractor JSON output files
+from S3 and scores the job for each of ERW's four companies using Claude AI.
 
 Static environment variables (ECS task definition):
-    ANTHROPIC_API_KEY:       Anthropic API key for Claude (required)
-    GOOGLE_CREDENTIALS_JSON: Base64-encoded service account JSON (required)
-    DATABASE_URL:            PostgreSQL connection string (optional)
-    S3_BUCKET:               S3 bucket name for writing results JSON (optional)
+    ANTHROPIC_API_KEY:   Anthropic API key for Claude (required)
+    DATABASE_URL:        PostgreSQL connection string (optional)
+    S3_BUCKET:           S3 bucket for writing results JSON (optional)
 
 Per-invocation environment variables (Step Functions containerOverrides):
-    GOOGLE_DRIVE_FILE_IDS:   Comma-separated Google Drive file IDs (required)
-    TASK_TOKEN:              Step Functions callback token (optional)
-    GENERATE_PDF:            Set to "true" to include PDF in result (optional)
-    SAVE_TO_DB:              Set to "true" to persist results to DB (optional)
+    INPUT_S3_BUCKET:     S3 bucket containing the input JSON files (required)
+    INPUT_S3_KEYS:       Comma-separated S3 object keys for the JSON files (required)
+    SCOPES:              JSON array of scope categories used in the Scope Extractor
+                         step, e.g. '["Softscape", "Concrete flatwork"]' (optional)
+    TASK_TOKEN:          Step Functions callback token (optional)
+    GENERATE_PDF:        Set to "true" to include PDF as base64 in result (optional)
+    SAVE_TO_DB:          Set to "true" to persist results to PostgreSQL (optional)
 """
 
 import anthropic
@@ -28,14 +29,8 @@ import sys
 import uuid
 import base64
 import time
-from datetime import datetime
-from io import BytesIO
-
-import pandas as pd
 import requests
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from datetime import datetime
 
 # Optional database support
 try:
@@ -94,11 +89,8 @@ def enable_task_protection(task_arn):
     if not task_arn:
         return
     try:
-        cluster = task_arn.split(':task/')[1].split('/')[0] if '/task/' in task_arn else None
-        if not cluster:
-            # TaskARN format: arn:aws:ecs:region:account:task/cluster/taskid
-            parts = task_arn.split('/')
-            cluster = parts[-2] if len(parts) >= 3 else None
+        parts = task_arn.split('/')
+        cluster = parts[-2] if len(parts) >= 3 else None
         if cluster:
             ecs_client.update_task_protection(
                 cluster=cluster,
@@ -159,8 +151,16 @@ def send_task_failure(task_token, error, cause):
 
 
 # ---------------------------------------------------------------------------
-# S3 results
+# S3 — input and output
 # ---------------------------------------------------------------------------
+
+def download_file_from_s3(bucket, key):
+    """Download a Scope Extractor JSON file from S3. Returns (parsed dict, filename)."""
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    data = json.loads(response['Body'].read())
+    filename = key.split('/')[-1]
+    return data, filename
+
 
 def write_results_to_s3(job_id, result):
     """Write full result JSON to S3. Returns the S3 key, or None if not configured."""
@@ -179,97 +179,43 @@ def write_results_to_s3(job_id, result):
 
 
 # ---------------------------------------------------------------------------
-# Google Drive
+# Scope processing — reads Scope Extractor JSON format
 # ---------------------------------------------------------------------------
 
-def get_google_drive_service():
-    """Initialize Google Drive API service using credentials from environment."""
-    credentials_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-    if not credentials_json:
-        raise RuntimeError("GOOGLE_CREDENTIALS_JSON environment variable not set")
+def prepare_scope_summary_from_json(data):
+    """
+    Extract scope summary from a Scope Extractor JSON file.
 
-    try:
-        credentials_data = json.loads(base64.b64decode(credentials_json))
-    except Exception:
-        credentials_data = json.loads(credentials_json)
+    The input is a single file's JSON object containing a 'results' array
+    where each element represents one drawing page with scope boolean flags,
+    a text summary, density rating, and sheet metadata.
+    """
+    results = data.get('results', [])
 
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_data,
-        scopes=['https://www.googleapis.com/auth/drive.readonly']
-    )
-    return build('drive', 'v3', credentials=credentials)
+    # Count pages where each scope flag is True
+    scope_counts = {}
+    for result in results:
+        for scope_name, is_marked in result.get('scopes', {}).items():
+            if is_marked:
+                scope_counts[scope_name] = scope_counts.get(scope_name, 0) + 1
 
-
-def download_file_from_drive(service, file_id):
-    """Download a file from Google Drive. Returns (BytesIO, filename)."""
-    file_metadata = service.files().get(fileId=file_id, fields='name, mimeType').execute()
-    filename = file_metadata.get('name', f'{file_id}.xlsx')
-
-    request = service.files().get_media(fileId=file_id)
-    file_content = BytesIO()
-    downloader = MediaIoBaseDownload(file_content, request)
-
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-
-    file_content.seek(0)
-    return file_content, filename
-
-
-# ---------------------------------------------------------------------------
-# Scope processing
-# ---------------------------------------------------------------------------
-
-def normalize_columns(df):
-    """Normalize column names to standard format."""
-    column_mapping = {
-        'Page': 'pdf_page',
-        'Sheet Number': 'sheet_number',
-        'Title': 'title',
-        'Scale': 'scale',
-        'Scope Summary': 'scope_summary',
-        'Density': 'density',
-        'Est. Takeoff Time': 'estimated_takeoff_time',
-    }
-    df.columns = [column_mapping.get(col, col) for col in df.columns]
-    return df
-
-
-def prepare_scope_summary(df):
-    """Extract scope summary from a dataframe."""
-    scope_columns = [
-        'Aggregates / gravel', 'Concrete flatwork', 'Fencing', 'Furnishings',
-        'Irrigation', 'Pavers', 'Retaining walls', 'Softscape (landscape planting)',
-        'Synthetic turf', 'Drainage', 'Lighting', 'BMP / Environmental / Bioswales',
-    ]
-    existing_scope_cols = [c for c in scope_columns if c in df.columns]
-
-    scope_counts = {
-        col: int(df[col].notna().sum())
-        for col in existing_scope_cols
-        if df[col].notna().sum() > 0
-    }
-
-    sheets_with_scope = (
-        df[df[existing_scope_cols].notna().any(axis=1)]
-        if existing_scope_cols
-        else pd.DataFrame()
-    )
-
+    # Build sheet details for pages with any scope marked or a useful summary
     sheet_details = []
-    for _, row in sheets_with_scope.iterrows():
-        marked_items = [col for col in existing_scope_cols if pd.notna(row.get(col))]
-        sheet_details.append({
-            'sheet': f"Sheet {row.get('sheet_number', 'N/A')}: {row.get('title', 'N/A')}",
-            'summary': row.get('scope_summary', ''),
-            'density': row.get('density', ''),
-            'marked_scope': marked_items,
-        })
+    for result in results:
+        marked = [name for name, val in result.get('scopes', {}).items() if val]
+        if marked or result.get('scope_summary'):
+            sheet_details.append({
+                'sheet': f"Sheet {result.get('sheet_number', 'N/A')}: {result.get('title', 'N/A')}",
+                'summary': result.get('scope_summary', ''),
+                'density': result.get('density', ''),
+                'marked_scope': marked,
+            })
+
+    pages_with_scope = sum(1 for r in results if any(r.get('scopes', {}).values()))
 
     return {
-        'total_sheets': len(df),
-        'sheets_with_scope': len(sheets_with_scope),
+        'total_sheets': len(results),
+        'sheets_with_scope': pages_with_scope,
         'scope_indicator_counts': scope_counts,
         'sheet_details': sheet_details[:50],
     }
@@ -300,24 +246,29 @@ def combine_scope_data(scope_data_list):
 # AI scoring
 # ---------------------------------------------------------------------------
 
-def score_job(scope_data):
+def score_job(scope_data, scopes=None):
     """Score the job using Claude AI. Returns parsed JSON dict."""
-    prompt = f"""You are an expert construction estimator familiar with ERW Site Solutions, a Texas-based exterior improvements contractor. Analyze this scope extractor output and score the job for each of their four companies.
+    scopes_note = (
+        f"\n**Scope categories tracked for this extraction run:** {json.dumps(scopes)}\n"
+        if scopes else ""
+    )
+
+    prompt = f"""You are an expert construction estimator familiar with ERW Site Solutions, a Texas-based exterior improvements contractor. Analyze this Scope Extractor output and score the job for each of their four companies.
 
 ## Scope Data Summary
 
-**Total sheets analyzed:** {scope_data['total_sheets']}
-**Sheets with identifiable scope:** {scope_data['sheets_with_scope']}
-
-**Scope indicator counts across all sheets:**
+**Total pages analyzed:** {scope_data['total_sheets']}
+**Pages with identifiable scope:** {scope_data['sheets_with_scope']}
+{scopes_note}
+**Scope indicator counts (pages where each category was marked true):**
 {json.dumps(scope_data['scope_indicator_counts'], indent=2)}
 
-**Detailed sheet-by-sheet scope (showing sheets with marked scope items):**
+**Detailed page-by-page scope (pages with marked scope items or useful summaries):**
 {json.dumps(scope_data['sheet_details'], indent=2)}
 
 ## Scoring Instructions
 
-Score each company from 0-5 based on:
+Score each company from 0-5 based on estimated scope value:
 - **0**: No meaningful scope for this company
 - **1**: Minimal scope, clearly under $250k, only useful to complete a package
 - **2**: Light scope, borderline viability ($100-250k range)
@@ -327,20 +278,23 @@ Score each company from 0-5 based on:
 
 ## Company Scope Mapping
 
-**ERW Retaining Walls**: Look for `Retaining walls` indicators and mentions of MSE walls, gravity walls, boulder walls, grade changes, tiered walls, structural walls in summaries.
+Use both the `scope_indicator_counts` keys and keywords in `scope_summary` text to assess each company.
 
-**Kaufman Concrete**: Look for `Concrete flatwork` indicators and mentions of sidewalks, curb/gutter, concrete paving, driveways, ADA ramps, concrete steps, reinforced concrete in summaries.
+**ERW Retaining Walls**: Look for scope indicators and summary keywords related to retaining walls, MSE walls, gravity walls, boulder walls, grade changes, tiered walls, structural walls, segmental block walls.
 
-**Landtec Landscape**: Look for `Softscape (landscape planting)`, `Irrigation`, `Synthetic turf` indicators and mentions of trees, shrubs, sod, planting, mulch, irrigation systems in summaries.
+**Kaufman Concrete**: Look for scope indicators and summary keywords related to concrete flatwork, sidewalks, curb and gutter, concrete paving, driveways, ADA ramps, concrete steps, reinforced concrete slabs, concrete pavers, unit paving.
 
-**Ratliff Hardscape**: Look for `Pavers`, `Aggregates / gravel`, `Furnishings` indicators and mentions of pavers, stone, decomposed granite, site furnishings, benches, water features, pools, outdoor amenities, pavilions, playground equipment in summaries.
+**Landtec Landscape**: Look for scope indicators and summary keywords related to softscape, landscape planting, trees, shrubs, sod, turf, mulch, irrigation systems, planting beds, groundcover, artificial turf, synthetic turf.
+
+**Ratliff Hardscape**: Look for scope indicators and summary keywords related to pavers, unit paving, concrete pavers, stone, decomposed granite, aggregates, gravel, site furnishings, benches, water features, pools, outdoor amenities, pavilions, playground equipment.
 
 ## Important Considerations
 
-1. **Sheet count matters**: More sheets with scope = larger project
-2. **Density ratings**: "High" density sheets have more work than "Low" density
-3. **Cross-reference summaries**: The scope_summary often contains details not captured in indicator columns
+1. **Page count matters**: More pages with scope = larger project
+2. **Density ratings**: "High" density pages have more work than "Low" density
+3. **Cross-reference summaries**: The scope_summary text often contains details not captured in scope flags
 4. **Package value**: Even if one company has low scope, it might still be valuable to complete a turnkey package
+5. **Scope categories are dynamic**: The tracked categories depend on what was selected for this extraction run — absence of a flag does not mean absence of that work; check scope_summary text carefully
 
 Respond with ONLY a JSON object in this exact format:
 {{
@@ -417,6 +371,7 @@ def generate_pdf(job_results_list):
     if not HAS_REPORTLAB:
         raise RuntimeError("reportlab not installed")
 
+    from io import BytesIO
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5 * inch, bottomMargin=0.5 * inch)
     styles = getSampleStyleSheet()
@@ -444,7 +399,7 @@ def generate_pdf(job_results_list):
         scores = job['scores']
         story.append(Paragraph(f"Job: {job['filename']}", heading_style))
         story.append(Paragraph(
-            f"Sheets analyzed: {job['summary']['total_sheets']} ({job['summary']['sheets_with_scope']} with scope)",
+            f"Pages analyzed: {job['summary']['total_sheets']} ({job['summary']['sheets_with_scope']} with scope)",
             normal_style
         ))
         story.append(Paragraph(f"<b>Package Score: {scores['package_score']}/5</b>", normal_style))
@@ -511,36 +466,37 @@ def main():
 
     try:
         # Read per-invocation config from environment
-        file_ids_env = os.environ.get('GOOGLE_DRIVE_FILE_IDS', '')
-        file_ids = [fid.strip() for fid in file_ids_env.split(',') if fid.strip()]
+        input_bucket = os.environ.get('INPUT_S3_BUCKET', '').strip()
+        keys_env = os.environ.get('INPUT_S3_KEYS', '')
+        s3_keys = [k.strip() for k in keys_env.split(',') if k.strip()]
 
-        if not file_ids:
-            raise ValueError("No file IDs provided. Set GOOGLE_DRIVE_FILE_IDS.")
+        if not input_bucket or not s3_keys:
+            raise ValueError("INPUT_S3_BUCKET and INPUT_S3_KEYS must be set.")
+
+        scopes_env = os.environ.get('SCOPES', '')
+        scopes = json.loads(scopes_env) if scopes_env else []
 
         save_to_db = os.environ.get('SAVE_TO_DB', '').lower() == 'true'
         generate_pdf_output = os.environ.get('GENERATE_PDF', '').lower() == 'true'
 
-        # Download and process files
-        drive_service = get_google_drive_service()
+        # Download and process JSON files from S3
         scope_data_list = []
         filenames = []
 
-        for file_id in file_ids:
-            print(f"Downloading file: {file_id}")
-            file_content, filename = download_file_from_drive(drive_service, file_id)
+        for key in s3_keys:
+            print(f"Downloading s3://{input_bucket}/{key}")
+            data, filename = download_file_from_s3(input_bucket, key)
             filenames.append(filename)
 
-            df = pd.read_excel(file_content)
-            df = normalize_columns(df)
-            scope_data = prepare_scope_summary(df)
+            scope_data = prepare_scope_summary_from_json(data)
             scope_data_list.append(scope_data)
-            print(f"Processed {filename}: {scope_data['total_sheets']} sheets ({scope_data['sheets_with_scope']} with scope)")
+            print(f"Processed {filename}: {scope_data['total_sheets']} pages ({scope_data['sheets_with_scope']} with scope)")
 
         combined_scope = scope_data_list[0] if len(scope_data_list) == 1 else combine_scope_data(scope_data_list)
 
         # Score
         print("Scoring job with Claude AI...")
-        scores = score_job(combined_scope)
+        scores = score_job(combined_scope, scopes=scopes)
 
         job_id = str(uuid.uuid4())[:8]
         display_filename = filenames[0] if len(filenames) == 1 else f"{len(filenames)} files: {', '.join(filenames)}"
@@ -578,7 +534,7 @@ def main():
             result['s3_key'] = s3_key
             result['s3_bucket'] = os.environ.get('S3_BUCKET')
 
-        # Generate PDF if requested (included inline as base64)
+        # Generate PDF if requested
         if generate_pdf_output:
             try:
                 pdf_buffer = generate_pdf([{'filename': display_filename, 'summary': summary, 'scores': scores}])

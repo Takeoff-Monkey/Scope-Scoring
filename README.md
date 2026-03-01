@@ -133,17 +133,7 @@ Scope-Scoring/
 
 ## ECS Fargate Deployment
 
-The scorer runs as a headless ECS Fargate task invoked by AWS Step Functions using the WAIT_FOR_TASK (callback) pattern. Unlike Lambda, there is no runtime limit, making it suitable for large Excel files. Files are fetched from Google Drive.
-
-### Google Drive Setup
-
-1. Create a Google Cloud project and enable the Google Drive API
-2. Create a service account and download the JSON credentials key file
-3. Share the target Drive files with the service account email address
-4. Base64-encode the credentials for storage as an environment variable:
-   ```bash
-   base64 -i service-account.json
-   ```
+The scorer runs as a headless ECS Fargate task invoked by AWS Step Functions using the WAIT_FOR_TASK (callback) pattern. It reads Scope Extractor JSON output files from S3, scores the job with Claude AI, and reports results back to Step Functions.
 
 ### Container Environment Variables
 
@@ -152,15 +142,16 @@ The scorer runs as a headless ECS Fargate task invoked by AWS Step Functions usi
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude |
-| `GOOGLE_CREDENTIALS_JSON` | Yes | Base64-encoded service account JSON |
 | `DATABASE_URL` | No | PostgreSQL connection string |
-| `S3_BUCKET` | No | S3 bucket name for writing results JSON |
+| `S3_BUCKET` | No | S3 bucket for writing results JSON |
 
 **Passed via Step Functions `containerOverrides` (per invocation):**
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GOOGLE_DRIVE_FILE_IDS` | Yes | Comma-separated Google Drive file IDs |
+| `INPUT_S3_BUCKET` | Yes | S3 bucket containing the input JSON files |
+| `INPUT_S3_KEYS` | Yes | Comma-separated S3 object keys for the JSON files |
+| `SCOPES` | No | JSON array of scope categories used in the Scope Extractor step, e.g. `'["Softscape", "Concrete flatwork"]'` |
 | `TASK_TOKEN` | No | Step Functions callback token for `SendTaskSuccess`/`SendTaskFailure` |
 | `GENERATE_PDF` | No | Set to `"true"` to include PDF as base64 in result |
 | `SAVE_TO_DB` | No | Set to `"true"` to persist results to PostgreSQL |
@@ -195,15 +186,15 @@ docker build -t erw-job-scorer .
 {
     "status": "completed",
     "job_id": "abc12345",
-    "filename": "project.xlsx",
-    "files_analyzed": ["project.xlsx"],
+    "filename": "job123.json",
+    "files_analyzed": ["job123.json"],
     "analyzed_at": "2024-01-15T10:30:00",
     "processing_time_seconds": 42.1,
     "summary": {
-        "total_sheets": 45,
-        "sheets_with_scope": 12,
-        "scope_counts": {...},
-        "files_analyzed": [...]
+        "total_sheets": 240,
+        "sheets_with_scope": 45,
+        "scope_counts": {"concrete flatwork": 18, "fence": 7, "fencing": 7},
+        "files_analyzed": ["job123.json"]
     },
     "scores": {
         "erw_retaining_walls": {"score": 3, "reasoning": "...", "key_indicators": [...]},
@@ -222,8 +213,9 @@ docker build -t erw-job-scorer .
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-export GOOGLE_CREDENTIALS_JSON=$(base64 -i service-account.json)
-export GOOGLE_DRIVE_FILE_IDS=1ABC123...,1DEF456...
+export INPUT_S3_BUCKET=my-input-bucket
+export INPUT_S3_KEYS=extractions/job123.json,extractions/job456.json
+export SCOPES='["Concrete flatwork", "Fencing", "Softscape"]'
 
 # Run without TASK_TOKEN — skips Step Functions callback, prints result to stdout
 python scorer.py
@@ -231,8 +223,9 @@ python scorer.py
 # Or via Docker
 docker run \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  -e GOOGLE_CREDENTIALS_JSON="$GOOGLE_CREDENTIALS_JSON" \
-  -e GOOGLE_DRIVE_FILE_IDS="$GOOGLE_DRIVE_FILE_IDS" \
+  -e INPUT_S3_BUCKET="$INPUT_S3_BUCKET" \
+  -e INPUT_S3_KEYS="$INPUT_S3_KEYS" \
+  -e SCOPES="$SCOPES" \
   erw-job-scorer
 ```
 

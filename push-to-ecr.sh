@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Push Lambda Docker image to Amazon ECR
+# Push ERW Job Scorer ECS container image to Amazon ECR
 # Usage: ./push-to-ecr.sh
 
 set -e
@@ -51,7 +51,7 @@ ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY_NAME"
 
 echo "============================================"
-echo "Pushing Lambda to ECR"
+echo "Pushing ECS Task Image to ECR"
 echo "============================================"
 echo "AWS Account:  $AWS_ACCOUNT_ID"
 echo "Region:       $AWS_REGION"
@@ -107,13 +107,16 @@ echo "Image URI: $IMAGE_URI:latest"
 echo "Versioned: $IMAGE_URI:$TIMESTAMP"
 echo ""
 echo "Next steps:"
-echo "1. Create or update your Lambda function with this image"
-echo "2. Set the required environment variables in Lambda:"
+echo "1. Update your ECS task definition to use the new image URI"
+echo "2. Set the required environment variables in the task definition:"
 echo "   - ANTHROPIC_API_KEY (required)"
-echo "   - GOOGLE_CREDENTIALS_JSON (required, base64-encoded service account)"
-echo "   - GOOGLE_DRIVE_FILE_IDS (required, comma-separated file IDs)"
 echo "   - DATABASE_URL (optional, for persistence)"
-echo "   - GENERATE_PDF (optional, set to 'true' to include PDF)"
+echo "   - S3_BUCKET (optional, for writing results JSON)"
+echo "3. Pass per-invocation variables via Step Functions containerOverrides:"
+echo "   - INPUT_S3_BUCKET (required, bucket containing input JSON files)"
+echo "   - INPUT_S3_KEYS (required, comma-separated S3 keys for JSON files)"
+echo "   - SCOPES (optional, JSON array of scope categories from Scope Extractor)"
+echo "   - TASK_TOKEN (optional, Step Functions callback token)"
+echo "   - GENERATE_PDF (optional, set to 'true' to include PDF in result)"
 echo "   - SAVE_TO_DB (optional, set to 'true' to persist results)"
-echo "3. Set memory to 1024MB and timeout to 2 minutes"
 echo "============================================"
