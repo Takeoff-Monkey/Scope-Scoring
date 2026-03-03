@@ -487,10 +487,10 @@ def main():
             print(f"Downloading s3://{input_bucket}/{key}")
             data, filename = download_file_from_s3(input_bucket, key)
             filenames.append(filename)
-
-            scope_data = prepare_scope_summary_from_json(data)
-            scope_data_list.append(scope_data)
-            print(f"Processed {filename}: {scope_data['total_sheets']} pages ({scope_data['sheets_with_scope']} with scope)")
+            for result in data:
+                scope_data = prepare_scope_summary_from_json(result)
+                scope_data_list.append(scope_data)
+                print(f"Processed {result.get('file_id', 'unknown')}: {scope_data['total_sheets']} pages ({scope_data['sheets_with_scope']} with scope)")
 
         combined_scope = scope_data_list[0] if len(scope_data_list) == 1 else combine_scope_data(scope_data_list)
 
