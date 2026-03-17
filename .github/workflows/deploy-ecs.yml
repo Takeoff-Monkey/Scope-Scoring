@@ -14,7 +14,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: erw-job-scorer
+  ECR_REPOSITORY: prod/scope-scoring
 
 jobs:
   build-and-push:
