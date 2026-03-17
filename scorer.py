@@ -16,6 +16,10 @@ Per-invocation environment variables (Step Functions containerOverrides):
     SCOPES:              JSON array of scope categories used in the Scope Extractor
                          step, e.g. '["Softscape", "Concrete flatwork"]' (optional)
     TASK_TOKEN:          Step Functions callback token (optional)
+    COMPANIES:           JSON array of company objects to score against, e.g.
+                         '[{"name": "My Co", "keywords": ["retaining walls"]}]'
+                         If omitted or empty, falls back to the hardcoded ERW
+                         company definitions in score_prompts.py (optional)
     GENERATE_PDF:        Set to "true" to include PDF as base64 in result (optional)
     SAVE_TO_DB:          Set to "true" to persist results to PostgreSQL (optional)
 """
@@ -246,81 +250,19 @@ def combine_scope_data(scope_data_list):
 # AI scoring
 # ---------------------------------------------------------------------------
 
-def score_job(scope_data, scopes=None):
-    """Score the job using Claude AI. Returns parsed JSON dict."""
-    scopes_note = (
-        f"\n**Scope categories tracked for this extraction run:** {json.dumps(scopes)}\n"
-        if scopes else ""
-    )
+from score_prompts import build_score_prompt, build_dynamic_score_prompt
 
-    prompt = f"""You are an expert construction estimator familiar with ERW Site Solutions, a Texas-based exterior improvements contractor. Analyze this Scope Extractor output and score the job for each of their four companies.
 
-## Scope Data Summary
+def score_job(scope_data, scopes=None, companies=None):
+    """Score the job using Claude AI. Returns parsed JSON dict.
 
-**Total pages analyzed:** {scope_data['total_sheets']}
-**Pages with identifiable scope:** {scope_data['sheets_with_scope']}
-{scopes_note}
-**Scope indicator counts (pages where each category was marked true):**
-{json.dumps(scope_data['scope_indicator_counts'], indent=2)}
-
-**Detailed page-by-page scope (pages with marked scope items or useful summaries):**
-{json.dumps(scope_data['sheet_details'], indent=2)}
-
-## Scoring Instructions
-
-Score each company from 0-5 based on estimated scope value:
-- **0**: No meaningful scope for this company
-- **1**: Minimal scope, clearly under $250k, only useful to complete a package
-- **2**: Light scope, borderline viability ($100-250k range)
-- **3**: Decent scope, likely meets $250k threshold, worth pursuing
-- **4**: Strong scope, clearly exceeds $250k, high priority
-- **5**: Excellent scope, major opportunity ($500k+), top tier
-
-## Company Scope Mapping
-
-Use both the `scope_indicator_counts` keys and keywords in `scope_summary` text to assess each company.
-
-**ERW Retaining Walls**: Look for scope indicators and summary keywords related to retaining walls, MSE walls, gravity walls, boulder walls, grade changes, tiered walls, structural walls, segmental block walls.
-
-**Kaufman Concrete**: Look for scope indicators and summary keywords related to concrete flatwork, sidewalks, curb and gutter, concrete paving, driveways, ADA ramps, concrete steps, reinforced concrete slabs, concrete pavers, unit paving.
-
-**Landtec Landscape**: Look for scope indicators and summary keywords related to softscape, landscape planting, trees, shrubs, sod, turf, mulch, irrigation systems, planting beds, groundcover, artificial turf, synthetic turf.
-
-**Ratliff Hardscape**: Look for scope indicators and summary keywords related to pavers, unit paving, concrete pavers, stone, decomposed granite, aggregates, gravel, site furnishings, benches, water features, pools, outdoor amenities, pavilions, playground equipment.
-
-## Important Considerations
-
-1. **Page count matters**: More pages with scope = larger project
-2. **Density ratings**: "High" density pages have more work than "Low" density
-3. **Cross-reference summaries**: The scope_summary text often contains details not captured in scope flags
-4. **Package value**: Even if one company has low scope, it might still be valuable to complete a turnkey package
-5. **Scope categories are dynamic**: The tracked categories depend on what was selected for this extraction run — absence of a flag does not mean absence of that work; check scope_summary text carefully
-
-Respond with ONLY a JSON object in this exact format:
-{{
-    "erw_retaining_walls": {{
-        "score": <0-5>,
-        "reasoning": "<brief explanation of score>",
-        "key_indicators": ["<specific items found>"]
-    }},
-    "kaufman_concrete": {{
-        "score": <0-5>,
-        "reasoning": "<brief explanation of score>",
-        "key_indicators": ["<specific items found>"]
-    }},
-    "landtec_landscape": {{
-        "score": <0-5>,
-        "reasoning": "<brief explanation of score>",
-        "key_indicators": ["<specific items found>"]
-    }},
-    "ratliff_hardscape": {{
-        "score": <0-5>,
-        "reasoning": "<brief explanation of score>",
-        "key_indicators": ["<specific items found>"]
-    }},
-    "overall_recommendation": "<1-2 sentence summary of opportunity>",
-    "package_score": <0-5 overall attractiveness as turnkey package>
-}}"""
+    Uses build_dynamic_score_prompt if a non-empty companies list is provided,
+    otherwise falls back to build_score_prompt with the hardcoded ERW companies.
+    """
+    if companies:
+        prompt = build_dynamic_score_prompt(scope_data, companies, scopes=scopes)
+    else:
+        prompt = build_score_prompt(scope_data, scopes=scopes)
 
     message = anthropic_client.messages.create(
         model='claude-sonnet-4-5',
@@ -476,6 +418,9 @@ def main():
         scopes_env = os.environ.get('SCOPES', '')
         scopes = json.loads(scopes_env) if scopes_env else []
 
+        companies_env = os.environ.get('COMPANIES', '')
+        companies = json.loads(companies_env) if companies_env else []
+
         save_to_db = os.environ.get('SAVE_TO_DB', '').lower() == 'true'
         generate_pdf_output = os.environ.get('GENERATE_PDF', '').lower() == 'true'
 
@@ -496,7 +441,7 @@ def main():
 
         # Score
         print("Scoring job with Claude AI...")
-        scores = score_job(combined_scope, scopes=scopes)
+        scores = score_job(combined_scope, scopes=scopes, companies=companies)
 
         job_id = str(uuid.uuid4())[:8]
         display_filename = filenames[0] if len(filenames) == 1 else f"{len(filenames)} files: {', '.join(filenames)}"
