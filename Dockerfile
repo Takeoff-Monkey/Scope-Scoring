@@ -14,5 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the scorer entrypoint
 COPY scorer.py .
+COPY score_prompts.py .
 
 CMD ["python", "scorer.py"]
