@@ -420,6 +420,11 @@ def main():
 
         companies_env = os.environ.get('COMPANIES', '')
         companies = json.loads(companies_env) if companies_env else []
+        # Normalize company_name -> name for compatibility with the prompt builder
+        companies = [
+            {**c, 'name': c['name']} if 'name' in c else {**c, 'name': c['company_name']}
+            for c in companies
+        ]
 
         save_to_db = os.environ.get('SAVE_TO_DB', '').lower() == 'true'
         generate_pdf_output = os.environ.get('GENERATE_PDF', '').lower() == 'true'
